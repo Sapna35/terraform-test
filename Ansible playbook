@@ -1,0 +1,105 @@
+- hosts: app
+  become: true
+  vars:
+    tomcat_version: 9.0.78   # use a stable version
+    tomcat_user: tomcat
+    tomcat_install_dir: /opt/tomcat
+    war_name: addressbook.war   # name of generated war in Jenkins workspace target/
+  tasks:
+    - name: Ensure Java is installed
+      apt:
+        name: default-jre
+        state: present
+        update_cache: yes
+
+    - name: Create tomcat user
+      user:
+        name: "{{ tomcat_user }}"
+        shell: /bin/false
+        state: present
+
+    - name: Create install dir
+      file:
+        path: "{{ tomcat_install_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Download Tomcat tar.gz
+      get_url:
+        url: "https://archive.apache.org/dist/tomcat/tomcat-9/v{{ tomcat_version }}/bin/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        dest: "/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        mode: '0644'
+
+    - name: Extract Tomcat
+      unarchive:
+        src: "/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+        dest: "{{ tomcat_install_dir }}"
+        remote_src: yes
+        creates: "{{ tomcat_install_dir }}/apache-tomcat-{{ tomcat_version }}"
+
+    - name: Symlink tomcat
+      file:
+        src: "{{ tomcat_install_dir }}/apache-tomcat-{{ tomcat_version }}"
+        dest: /opt/tomcat/latest
+        state: link
+        force: yes
+
+    - name: chown tomcat dir
+      file:
+        path: "{{ tomcat_install_dir }}/apache-tomcat-{{ tomcat_version }}"
+        recurse: yes
+        owner: "{{ tomcat_user }}"
+
+    - name: Ensure systemd service for tomcat
+      copy:
+        dest: /etc/systemd/system/tomcat.service
+        content: |
+          [Unit]
+          Description=Apache Tomcat Web Application Container
+          After=network.target
+
+          [Service]
+          Type=forking
+
+          Environment=JAVA_HOME=/usr/lib/jvm/java-11-openjdk-amd64
+          Environment=CATALINA_PID=/opt/tomcat/latest/temp/tomcat.pid
+          Environment=CATALINA_HOME=/opt/tomcat/latest
+          Environment=CATALINA_BASE=/opt/tomcat/latest
+          Environment='CATALINA_OPTS=-Xms512M -Xmx1024M -server -XX:+UseParallelGC'
+          ExecStart=/opt/tomcat/latest/bin/startup.sh
+          ExecStop=/opt/tomcat/latest/bin/shutdown.sh
+          User=tomcat
+          Group=tomcat
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - daemon-reload
+        - start-tomcat
+
+    - name: Ensure webapps directory is writable by tomcat
+      file:
+        path: /opt/tomcat/latest/webapps
+        owner: tomcat
+        recurse: yes
+
+    - name: Copy WAR to app server (deployed by Jenkins)
+      copy:
+        src: "{{ playbook_dir }}/../target/{{ war_name }}"
+        dest: /opt/tomcat/latest/webapps/{{ war_name }}
+        owner: tomcat
+        mode: '0644'
+      when: ansible_connection == "local" or lookup('file', playbook_dir + '/../target/' + war_name) is defined
+
+  handlers:
+    - name: daemon-reload
+      command: systemctl daemon-reload
+
+    - name: start-tomcat
+      systemd:
+        name: tomcat
+        state: started
+        enabled: yes
